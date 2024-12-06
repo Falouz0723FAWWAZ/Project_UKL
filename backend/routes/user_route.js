@@ -15,7 +15,7 @@ app.get('/users', getAllUser)
 app.get('/users:id',getUserById)
 app.post('/user', addUser)
 app.put('/:id', authorize, updateUser)
-app.delete('/:id', authorize, deleteUser)
+app.delete('/:id', deleteUser)
 
 
 app.post('/login', authenticate)

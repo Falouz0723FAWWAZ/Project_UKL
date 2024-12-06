@@ -20,6 +20,7 @@ app.use("/api/users", userRoute);
 app.use("/api/inventory", barang);
 app.use("/api/inventor", transaksiRoute);
 
+
 app.use(bodyParser.json());
 
 app.listen(process.env.APP_PORT, () => {

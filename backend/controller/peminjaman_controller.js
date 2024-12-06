@@ -71,77 +71,81 @@ export const getPeminjamanById = async (req, res) => {
 export const addPeminjaman = async (req, res) => {
   const { id_user, item_id, borrow_date, return_date, qty } = req.body;
 
-  const formattedBorrowDate = new Date(borrow_date).toISOString();
-  const formattedReturnDate = new Date(return_date).toISOString();
+  // Validasi input
+  if (!id_user || !item_id || !borrow_date || !return_date || !qty) {
+    return res.status(400).json({
+      success: false,
+      message: "Data tidak lengkap. Semua field wajib diisi.",
+    });
+  }
 
-  const [getUserId, getBarangId] = await Promise.all([
-    prisma.user.findUnique({ where: { id_user: Number(id_user) } }),
-    prisma.barang.findUnique({ where: { id_barang: Number(item_id) } }),
-  ]);
+  try {
+    // Format tanggal
+    const formattedBorrowDate = new Date(borrow_date).toISOString();
+    const formattedReturnDate = new Date(return_date).toISOString();
 
-  if (getUserId && getBarangId) {
-    try {
-      const result = await prisma.peminjaman.create({
-        data: {
-          user: {
-            connect: {
-              id_user: Number(id_user),
-            },
-          },
-          barang: {
-            connect: {
-              id_barang: Number(item_id),
-            },
-          },
-          qty: qty,
-          borrow_date: formattedBorrowDate,
-          return_date: formattedReturnDate,
-        },
-      });
-      if (result) {
-        const item = await prisma.barang.findUnique({
-          where: { id_barang: Number(item_id) },
-        });
+    // Validasi keberadaan user dan barang
+    const [user, barang] = await Promise.all([
+      prisma.user.findUnique({ where: { id_user: Number(id_user) } }),
+      prisma.barang.findUnique({ where: { id_barang: Number(item_id) } }),
+    ]);
 
-        if (!item) {
-          throw new Error(
-            `barang dengan id_barang ${id_barang} tidak ditemukan`
-          );
-        } else {
-          const minQty = item.quantity - qty;
-          const result = await prisma.barang.update({
-            where: {
-              id_barang: Number(item_id),
-            },
-            data: {
-              quantity: minQty,
-            },
-          });
-        }
-      }
-      res.status(201).json({
-        success: true,
-        message: "Peminjaman Berhasil Dicatat",
-        data: {
-          id_user: result.id_user,
-          id_barang: result.id_barang,
-          qty: result.qty,
-          borrow_date: result.borrow_date.toISOString().split("T")[0], // Format tanggal (YYYY-MM-DD)
-          return_date: result.return_date.toISOString().split("T")[0], // Format tanggal (YYYY-MM-DD)
-          status: result.status,
-        },
-      });
-    } catch (error) {
-      console.log(error);
-      res.json({
-        msg: error,
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User tidak ditemukan.",
       });
     }
-  } else {
-    res.json({ msg: "user dan barangh belum ada" });
+
+    if (!barang) {
+      return res.status(404).json({
+        success: false,
+        message: "Barang tidak ditemukan.",
+      });
+    }
+
+    // Validasi stok barang
+    if (barang.quantity < qty) {
+      return res.status(400).json({
+        success: false,
+        message: "Jumlah barang tidak mencukupi.",
+      });
+    }
+
+    // Proses pembuatan peminjaman
+    const peminjaman = await prisma.peminjaman.create({
+      data: {
+        user: { connect: { id_user: Number(id_user) } },
+        barang: { connect: { id_barang: Number(item_id) } },
+        qty,
+        borrow_date: formattedBorrowDate,
+        return_date: formattedReturnDate,
+        status: "dipinjam",
+      },
+    });
+
+    // Update stok barang
+    await prisma.barang.update({
+      where: { id_barang: Number(item_id) },
+      data: { quantity: barang.quantity - qty },
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Peminjaman berhasil dicatat.",
+      data: peminjaman,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      success: false,
+      message: "Terjadi kesalahan server.",
+      error: error.message,
+    });
   }
 };
-export const pengembalianBarang = async (req, res) => {
+
+export const pengembalianBarang = async (req, res) => { 
   const { borrow_id, return_date } = req.body;
 
   const formattedReturnDate = new Date(return_date).toISOString();
@@ -204,62 +208,199 @@ export const pengembalianBarang = async (req, res) => {
     res.json({ msg: "user dan barang belum ada" });
   }
 };
-export const getUsageReport = async (req, res) => {
+
+export const getUsageAnalysis = async (req, res) => {
   const { start_date, end_date, group_by } = req.body;
 
+  // Validasi input
   if (!start_date || !end_date || !group_by) {
     return res.status(400).json({
       status: "error",
-      message: "start_date, end_date, dan group_by wajib diisi.",
-    });
-  }
-
-  if (!["category", "location"].includes(group_by)) {
-    return res.status(400).json({
-      status: "error",
-      message: "group_by hanya dapat berupa 'category' atau 'location'.",
+      message: "start_date, end_date, and group_by are required",
     });
   }
 
   try {
-    // Query database untuk analisis penggunaan barang
-    const usageAnalysis = await prisma.barang.groupBy({
-      by: [group_by],
+    // filter berdasarkan tanggal
+    const borrowData = await prisma.peminjaman.findMany({
       where: {
-        created_at: {
-          gte: new Date(start_date),
-          lte: new Date(end_date),
-        },
+        borrow_date: { gte: new Date(start_date) },
+        return_date: { lte: new Date(end_date) },
       },
-      _sum: {
-        quantity: true, // Total quantity barang
+      include: {
+        barang: true,
+        user: true,
       },
     });
 
-    // Simulasi analisis tambahan untuk borrowed, returned, dan in-use
-    const usageData = usageAnalysis.map((item) => ({
-      group: item[group_by],
-      total_borrowed: item._sum.quantity, // Simulasi jumlah barang dipinjam
-      total_returned: Math.floor(item._sum.quantity * 0.7), // Contoh: 70% barang dikembalikan
-      items_in_use: item._sum.quantity - Math.floor(item._sum.quantity * 0.7), // Sisa barang yang masih dipakai
-    }));
+    // Debug log untuk memeriksa data
+    console.log("Borrow Data:", borrowData);
+
+    // data berdasarkan group_by
+    const groupedData = borrowData.reduce((acc, record) => {
+      let groupKey;
+      if (group_by === "user") {
+        groupKey = record.user ? record.user.name : "Unknown User";
+      } else if (group_by === "item") {
+        groupKey = record.barang ? record.barang.name : "Unknown Item";
+      } else if (group_by === "category") {
+        groupKey = record.barang ? record.barang.category : "Unknown Category";
+      } else if (group_by === "location") {
+        groupKey = record.barang ? record.barang.location : "Unknown Location";
+      } else {
+        throw new Error("Invalid group_by value");
+      }
+
+      if (!acc[groupKey]) {
+        acc[groupKey] = {
+          group: groupKey,
+          total_borrowed: 0,
+          total_returned: 0,
+          items_in_use: 0,
+        };
+      }
+
+      acc[groupKey].total_borrowed += record.qty;
+      acc[groupKey].total_returned +=
+        record.status === "kembali" ? record.qty : 0;
+      acc[groupKey].items_in_use +=
+        record.status === "dipinjam" ? record.qty : 0;
+
+      return acc;
+    }, {});
+
+    //  respons
+    const usageAnalysis = Object.values(groupedData);
 
     res.status(200).json({
       status: "success",
       data: {
-        analysis_period: {
-          start_date: start_date,
-          end_date: end_date,
+        analysis_periode: {
+          start_date,
+          end_date,
         },
-        usage_analysis: usageData,
+        usage_analysis: usageAnalysis,
       },
     });
   } catch (error) {
     console.error(error);
     res.status(500).json({
       status: "error",
-      message: "Terjadi kesalahan pada server.",
-      error: error.message,
+      message: "Internal Server Error",
+    });
+  }
+};
+
+export const analyzeItems = async (req, res) => {
+  const { start_date, end_date } = req.body;
+
+  // validasi
+  if (!start_date || !end_date) {
+    return res.status(400).json({
+      status: "error",
+      message: "start_date and end_date are required",
+    });
+  }
+
+  try {
+    // Query untuk barang yang paling sering dipinjam
+    const frequentlyBorrowed = await prisma.peminjaman.groupBy({
+      by: ["id_barang"],
+      where: {
+        borrow_date: {
+          gte: new Date(start_date),
+        },
+        return_date: {
+          lte: new Date(end_date),
+        },
+      },
+      _sum: {
+        qty: true,
+      },
+      orderBy: {
+        _sum: {
+          qty: "desc",
+        },
+      },
+      take: 10, // Ambil 10 barang paling sering dipinjam
+    });
+
+    // detail barang
+    const frequentlyBorrowedItems = await Promise.all(
+      frequentlyBorrowed.map(async (item) => {
+        const barang = await prisma.barang.findUnique({
+          where: { id_barang: item.id_barang },
+        });
+        return {
+          item_id: item.id_barang,
+          name: barang.name,
+          category: barang.category,
+          total_borrowed: item._sum.qty,
+        };
+      })
+    );
+
+    // barang dengan pengembalian terlambat
+    const inefficientItemsData = await prisma.peminjaman.findMany({
+      where: {
+        borrow_date: {
+          gte: new Date(start_date),
+        },
+        return_date: {
+          lte: new Date(end_date),
+        },
+        status: "kembali",
+      },
+    });
+
+    const inefficientItems = await Promise.all(
+      inefficientItemsData
+        .reduce((acc, item) => {
+          const lateReturn =
+            new Date(item.return_date) > new Date(item.borrow_date);
+          if (lateReturn) {
+            const existing = acc.find((i) => i.id_barang === item.id_barang);
+            if (existing) {
+              existing.total_late_returns += 1;
+            } else {
+              acc.push({
+                item_id: item.id_barang,
+                total_late_returns: 1,
+              });
+            }
+          }
+          return acc;
+        }, [])
+        .map(async (item) => {
+          const barang = await prisma.barang.findUnique({
+            where: { id_barang: item.item_id },
+          });
+          return {
+            item_id: item.item_id,
+            name: barang.name,
+            category: barang.category,
+            total_late_returns: item.total_late_returns,
+          };
+        })
+    );
+
+    // respon
+    res.status(200).json({
+      status: "success",
+      data: {
+        analysis_period: {
+          start_date,
+          end_date,
+        },
+        frequently_borrowed_items: frequentlyBorrowedItems,
+        inefficient_items: inefficientItems,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      status: "error",
+      message: "Internal Server Error",
     });
   }
 };
